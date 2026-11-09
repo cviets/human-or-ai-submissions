@@ -19,6 +19,7 @@ from sklearn.feature_extraction.text import (
 )
 
 from folds import N_FOLDS, SEED, make_folds
+from layout import normalize_texts
 
 
 TF_SCHEMES = ("log", "log1p", "binary")
@@ -80,23 +81,27 @@ def build_features(
     char_ngrams: tuple[int, int] = (3, 5),
     word_max_features: int | None = None,
     char_max_features: int | None = 300_000,
+    layout: bool = True,
 ) -> Pipeline:
     """TF-IDF (optionally followed by SVD); everything except the classifier.
 
-    A max_features of None keeps every n-gram that passes min_df.
+    A max_features of None keeps every n-gram that passes min_df. With
+    layout=False, whitespace and markdown markers are normalized away first.
     """
     features = FeatureUnion([
         ("word", make_vectorizer(
             tf, idf, analyzer="word", ngram_range=tuple(word_ngrams), min_df=2,
             max_features=word_max_features, lowercase=True,
         )),
-        # Keep case and whitespace: formatting is a strong signal in this data.
+        # Keep case and whitespace (unless layout=False): formatting is a strong
+        # signal in train, though it does not all carry over to test.
         ("char", make_vectorizer(
             tf, idf, analyzer="char", ngram_range=tuple(char_ngrams), min_df=3,
             max_features=char_max_features, lowercase=False,
         )),
     ])
-    steps = [("tfidf", features)]
+    steps = [] if layout else [("strip_layout", FunctionTransformer(normalize_texts))]
+    steps.append(("tfidf", features))
     if svd_dim > 0:
         steps += [
             ("svd", TruncatedSVD(n_components=svd_dim, random_state=SEED)),

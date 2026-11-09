@@ -7,6 +7,13 @@ For each outer fold (the fixed folds from folds.py):
   2. Train LightGBM on [style features] and on [style features + LR score],
      early-stopping on a 10% holdout of the outer-train rows.
 Validation rows are never used for fitting anything, including early stopping.
+
+--strip-layout normalizes whitespace and markdown before TF-IDF and the style
+features, and drops the layout-only style features (see layout.py).
+
+--cv cluster replaces the fixed random folds with leave-cluster-out CV: each
+topic cluster from clusters.py is held out in turn, so every score measures
+generalization to an unseen genre.
 """
 
 from __future__ import annotations
@@ -22,7 +29,8 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from baseline_tfidf import build_features, make_classifier
-from folds import N_FOLDS, SEED, make_folds
+from clusters import make_clusters, split_shares
+from folds import SEED, make_folds
 from style_features import style_features
 
 LGBM_PARAMS = dict(
@@ -66,7 +74,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--train", type=Path, default=Path("../../../data/train.csv"))
+    parser.add_argument("--test", type=Path, default=Path("../../../data/test.csv"),
+                        help="test text, used (without labels) only to build clusters")
+    parser.add_argument("--cv", choices=("random", "cluster"), default="random",
+                        help="fixed random 5-fold, or leave-one-topic-cluster-out")
     parser.add_argument("--C", type=float, default=30.0, help="LR inverse L2 strength")
+    parser.add_argument("--strip-layout", action="store_true",
+                        help="remove newlines/markdown from the inputs")
     parser.add_argument("--out", type=Path, default=Path("lgbm_stack.csv"),
                         help="per-fold metrics")
     parser.add_argument("--oof-out", type=Path, default=Path("oof_lgbm_stack.csv"),
@@ -74,17 +88,22 @@ def main() -> None:
     args = parser.parse_args()
 
     train = pd.read_csv(args.train)
-    fold = make_folds(train)
+    if args.cv == "random":
+        fold, names = make_folds(train), {}
+    else:
+        fold, names = make_clusters(train, pd.read_csv(args.test))
+    groups = np.unique(fold)
     y = train["label"].to_numpy()
-    style = style_features(train["text"])
+    layout = not args.strip_layout
+    style = style_features(train["text"], layout=layout)
     print(f"{style.shape[1]} style features")
 
     oof = {name: np.zeros(len(train)) for name in ("logreg", "lgbm_style", "lgbm_style_lr")}
     rows, importances = [], []
-    for k in range(N_FOLDS):
+    for k in groups:
         t0 = time.time()
         tr, va = fold != k, fold == k
-        features = build_features(0)
+        features = build_features(0, layout=layout)
         X_tr = features.fit_transform(train.loc[tr, "text"])
         X_va = features.transform(train.loc[va, "text"])
         lr_tr, lr_va = lr_scores(X_tr, y[tr], X_va, args.C)
@@ -99,8 +118,8 @@ def main() -> None:
 
         for name, p in oof.items():
             rows.append({"model": name, "fold": k, **scores(y[va], p[va])})
-        print(f"fold {k} done in {time.time() - t0:.0f}s (best iters: {model.best_iteration_})",
-              flush=True)
+        print(f"fold {k} done in {time.time() - t0:.0f}s (best iters: {model.best_iteration_})"
+              + (f" [{names[k]}]" if names else ""), flush=True)
 
     results = pd.DataFrame(rows)
     results.to_csv(args.out, index=False)
@@ -112,7 +131,19 @@ def main() -> None:
     wide = results.pivot(index="fold", columns="model", values="auc")
     for name in ("lgbm_style", "lgbm_style_lr"):
         d = wide[name] - wide["logreg"]
-        print(f"AUC {name} - logreg: mean {d.mean():+.4f}, better on {(d > 0).sum()}/{N_FOLDS} folds")
+        print(f"AUC {name} - logreg: mean {d.mean():+.4f}, better on {(d > 0).sum()}/{len(groups)} folds")
+
+    if args.cv == "cluster":
+        shares = split_shares()
+        # Reweight train rows so the cluster mix matches test's.
+        weight = pd.Series(fold).map(shares["test"] / shares["train"]).to_numpy()
+        table = wide.assign(train_n=pd.Series(fold).value_counts(),
+                            test_share=shares["test"], terms=pd.Series(names))
+        print("\nAUC per held-out cluster:")
+        print(table.round(4).to_string())
+        for name, p in oof.items():
+            print(f"{name:14s} pooled AUC {roc_auc_score(y, p):.4f} | "
+                  f"test-mix weighted {roc_auc_score(y, p, sample_weight=weight):.4f}")
 
     imp = pd.concat(importances, axis=1).mean(axis=1)
     print("\nTop 15 features by gain (style + LR stack):")

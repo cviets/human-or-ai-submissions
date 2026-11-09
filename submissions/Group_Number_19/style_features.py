@@ -7,6 +7,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from layout import normalize_texts
+
 _WORD = re.compile(r"\b\w+\b")
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _PARA_SPLIT = re.compile(r"\n\s*\n")
@@ -75,5 +77,20 @@ def _one(text: str) -> dict[str, float]:
     return f
 
 
-def style_features(texts) -> pd.DataFrame:
-    return pd.DataFrame([_one(t) for t in texts])
+# Features that only describe layout (newlines, paragraphs, markup, spacing).
+LAYOUT_FEATURES = [
+    "n_newlines", "n_double_newlines", "newline_rate", "frac_empty_lines",
+    "frac_bullet_lines", "n_heading_lines", "n_bold_markers", "starts_with_gt",
+    "n_trailing_space_lines", "n_double_spaces", "n_paragraphs",
+    *(f"{prefix}_{stat}" for prefix in ("line_len", "para_len")
+      for stat in ("mean", "std", "cv", "min", "max")),
+]
+
+
+def style_features(texts, layout: bool = True) -> pd.DataFrame:
+    """With layout=False, texts are layout-normalized first and the layout-only
+    features are dropped."""
+    if not layout:
+        texts = normalize_texts(texts)
+    features = pd.DataFrame([_one(t) for t in texts])
+    return features if layout else features.drop(columns=LAYOUT_FEATURES)
