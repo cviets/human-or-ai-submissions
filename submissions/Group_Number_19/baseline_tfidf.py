@@ -1,4 +1,4 @@
-"""Baseline: word + char TF-IDF -> logistic regression, scored with 5-fold CV."""
+"""Baseline: word (1-3) + char (3-5) TF-IDF -> logistic regression, scored with 5-fold CV."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer, Normalizer
+from sklearn.svm import LinearSVC
 from sklearn.feature_extraction.text import (
     CountVectorizer, TfidfTransformer, TfidfVectorizer,
 )
@@ -70,17 +72,28 @@ def make_vectorizer(tf: str, idf: str = "smooth", **kwargs):
     raise ValueError(f"unknown tf scheme {tf!r}; expected one of {TF_SCHEMES}")
 
 
-def build_features(svd_dim: int, tf: str = "binary", idf: str = "smooth") -> Pipeline:
-    """TF-IDF (optionally followed by SVD); everything except the classifier."""
+def build_features(
+    svd_dim: int,
+    tf: str = "binary",
+    idf: str = "smooth",
+    word_ngrams: tuple[int, int] = (1, 3),
+    char_ngrams: tuple[int, int] = (3, 5),
+    word_max_features: int | None = None,
+    char_max_features: int | None = 300_000,
+) -> Pipeline:
+    """TF-IDF (optionally followed by SVD); everything except the classifier.
+
+    A max_features of None keeps every n-gram that passes min_df.
+    """
     features = FeatureUnion([
         ("word", make_vectorizer(
-            tf, idf, analyzer="word", ngram_range=(1, 2), min_df=2, max_features=200_000,
-            lowercase=True,
+            tf, idf, analyzer="word", ngram_range=tuple(word_ngrams), min_df=2,
+            max_features=word_max_features, lowercase=True,
         )),
         # Keep case and whitespace: formatting is a strong signal in this data.
         ("char", make_vectorizer(
-            tf, idf, analyzer="char", ngram_range=(3, 5), min_df=3, max_features=300_000,
-            lowercase=False,
+            tf, idf, analyzer="char", ngram_range=tuple(char_ngrams), min_df=3,
+            max_features=char_max_features, lowercase=False,
         )),
     ])
     steps = [("tfidf", features)]
@@ -92,21 +105,60 @@ def build_features(svd_dim: int, tf: str = "binary", idf: str = "smooth") -> Pip
     return Pipeline(steps)
 
 
+MODELS = ("logreg", "svm")
+
+
+def make_classifier(model: str, C: float):
+    if model == "logreg":
+        return LogisticRegression(C=C, max_iter=2000)
+    if model == "svm":
+        # LinearSVC only gives decision scores; Platt-scale them into probabilities
+        # using inner 5-fold CV on the training rows, then refit on all of them.
+        return CalibratedClassifierCV(
+            LinearSVC(C=C, max_iter=10_000, random_state=SEED),
+            method="sigmoid", cv=5, ensemble=False,
+        )
+    raise ValueError(f"unknown model {model!r}; expected one of {MODELS}")
+
+
 def build_pipeline(svd_dim: int, C: float = 30.0, tf: str = "binary",
-                   idf: str = "smooth") -> Pipeline:
+                   idf: str = "smooth", model: str = "logreg",
+                   **feature_kwargs) -> Pipeline:
     return Pipeline([
-        ("features", build_features(svd_dim, tf, idf)),
-        ("clf", LogisticRegression(C=C, max_iter=2000)),
+        ("features", build_features(svd_dim, tf, idf, **feature_kwargs)),
+        ("clf", make_classifier(model, C)),
     ])
+
+
+def add_ngram_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--word-ngrams", type=int, nargs=2, default=[1, 3],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--char-ngrams", type=int, nargs=2, default=[3, 5],
+                        metavar=("MIN", "MAX"))
+    parser.add_argument("--word-max-features", type=int, default=0,
+                        help="0 = no cap")
+    parser.add_argument("--char-max-features", type=int, default=300_000,
+                        help="0 = no cap")
+
+
+def ngram_kwargs(args: argparse.Namespace) -> dict:
+    return {
+        "word_ngrams": tuple(args.word_ngrams),
+        "char_ngrams": tuple(args.char_ngrams),
+        "word_max_features": args.word_max_features or None,
+        "char_max_features": args.char_max_features or None,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train", type=Path, default=Path("../../../data/train.csv"))
     parser.add_argument("--svd", type=int, default=0, help="TruncatedSVD dim (0 = off)")
+    parser.add_argument("--model", choices=MODELS, default="logreg")
     parser.add_argument("--C", type=float, default=30.0, help="inverse L2 strength")
     parser.add_argument("--tf", choices=TF_SCHEMES, default="binary")
     parser.add_argument("--idf", choices=IDF_SCHEMES, default="smooth")
+    add_ngram_args(parser)
     parser.add_argument("--oof-out", type=Path, default=Path("oof_tfidf.csv"))
     args = parser.parse_args()
 
@@ -118,7 +170,8 @@ def main() -> None:
     for k in range(N_FOLDS):
         tr, va = fold != k, fold == k
         # Vectorizers are refit inside each fold so validation text never leaks.
-        model = build_pipeline(args.svd, args.C, args.tf, args.idf)
+        model = build_pipeline(args.svd, args.C, args.tf, args.idf, args.model,
+                               **ngram_kwargs(args))
         model.fit(train.loc[tr, "text"], y[tr])
         oof[va] = model.predict_proba(train.loc[va, "text"])[:, 1]
         print(f"fold {k}: auc={roc_auc_score(y[va], oof[va]):.4f} "
