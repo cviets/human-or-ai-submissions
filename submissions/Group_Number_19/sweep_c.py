@@ -1,4 +1,4 @@
-"""Sweep logistic-regression C for the TF-IDF baseline over SVD dims and tf schemes.
+"""Sweep logistic-regression C for the TF-IDF baseline over SVD dims and tf/idf schemes.
 
 Features are fit once per fold (on that fold's training rows only) and reused
 for every C, since C only affects the classifier.
@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 
-from baseline_tfidf import TF_SCHEMES, build_features
+from baseline_tfidf import IDF_SCHEMES, TF_SCHEMES, build_features
 from folds import N_FOLDS, make_folds
 
 
@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--svd-dims", type=int, nargs="+", default=[0, 300],
                         help="0 = plain TF-IDF")
     parser.add_argument("--tf", nargs="+", choices=TF_SCHEMES, default=["binary"])
+    parser.add_argument("--idf", nargs="+", choices=IDF_SCHEMES, default=["smooth"])
     parser.add_argument("--out", type=Path, default=Path("sweep_c.csv"))
     args = parser.parse_args()
 
@@ -34,25 +35,25 @@ def main() -> None:
     y = train["label"].to_numpy()
 
     rows = []
-    for tf, svd_dim in itertools.product(args.tf, args.svd_dims):
+    for tf, idf, svd_dim in itertools.product(args.tf, args.idf, args.svd_dims):
         for k in range(N_FOLDS):
             t0 = time.time()
             tr, va = fold != k, fold == k
-            features = build_features(svd_dim, tf)
+            features = build_features(svd_dim, tf, idf)
             X_tr = features.fit_transform(train.loc[tr, "text"])
             X_va = features.transform(train.loc[va, "text"])
             for C in args.Cs:
                 clf = LogisticRegression(C=C, max_iter=2000).fit(X_tr, y[tr])
                 p = clf.predict_proba(X_va)[:, 1]
-                rows.append({"tf": tf, "svd": svd_dim, "C": C, "fold": k,
+                rows.append({"tf": tf, "idf": idf, "svd": svd_dim, "C": C, "fold": k,
                              "auc": roc_auc_score(y[va], p),
                              "logloss": log_loss(y[va], p),
                              "acc": accuracy_score(y[va], p > 0.5)})
-            print(f"tf={tf} svd={svd_dim} fold {k} done in {time.time() - t0:.0f}s", flush=True)
+            print(f"tf={tf} idf={idf} svd={svd_dim} fold {k} done in {time.time() - t0:.0f}s", flush=True)
 
     results = pd.DataFrame(rows)
     results.to_csv(args.out, index=False)
-    summary = results.groupby(["tf", "svd", "C"])[["auc", "logloss", "acc"]].agg(["mean", "std"])
+    summary = results.groupby(["tf", "idf", "svd", "C"])[["auc", "logloss", "acc"]].agg(["mean", "std"])
     print(summary.round(4).to_string())
 
 
