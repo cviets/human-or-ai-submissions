@@ -103,3 +103,74 @@ check outputs. Team-authored TF-IDF, style features and LightGBM code are reused
 attribution. This note does not claim the user has reviewed all results yet; the user
 should inspect the comparisons, understand the selected model, and record their own
 modeling decisions before submitting the assignment.
+
+---
+
+# v2: shift-aware CatBoost (Yuchen, 2026-11-10)
+
+## Why v1 needed a different validation
+
+v1 picked models on a random holdout where every candidate scores ~0.999, yet the
+team's LightGBM got 0.9754 on the public leaderboard. The gap is distribution shift:
+topic cluster 4 (poetry / fiction / book summaries) is 35.8% of test but 1.5% of train.
+Within that cluster the v1 ranking is essentially "blank line => AI": all 444 blank-line
+test texts in cluster 4 get P(AI)>0.5, and 630 non-blank texts are ranked by weaker
+cues. Human poems in test have no blank lines (same formatting as train humans), so the
+blank-line rule still holds; the loss comes from ranking the non-blank AI texts.
+
+v2 therefore selects with **leave-one-topic-cluster-out CV (LCO)**, AUROC weighted to the
+test cluster mix (the team's proxy; LightGBM style+LR scored 0.9939 here vs 0.9754 LB),
+plus the same AUROC restricted to non-blank-line texts.
+
+## What changed
+
+1. `yuchen_features_v2.py`: 36 label-free, topic-independent features: word rarity from
+   a general-English unigram model (`wordfreq` Zipf: mean/std/percentiles, rare/OOV
+   share), zlib/lzma compressibility, poem structure (end-rhyme rate, line-initial case,
+   line-end punctuation, enjambment, archaic words), layout-free punctuation habits.
+2. Test-time self-training: CatBoost teacher (3 seeds) labels test rows with
+   P>0.95 or P<0.05 (2,652 of 3,000; 1,224 as AI); the student retrains on
+   train + those rows (weight 1). Uses test **text only**, never labels. In LCO this is
+   simulated by self-training on the held-out cluster.
+3. CatBoost depth 6, L2 3, lr 0.05, early stopping on a 10% holdout, 3-seed average;
+   LR meta-feature uses the strict 3-fold cross-fit (vocabulary refit per inner fold).
+
+Tried and dropped: augmenting train by collapsing blank lines in AI texts (LCO weighted
+AUC 0.9951 -> 0.9934 for LightGBM; it erases a signal that still holds in test);
+3 self-training rounds (no gain over 1 for CatBoost); LightGBM blend (+0.0002, noise).
+
+## Results (leave-cluster-out, measured by `yuchen_v2.py --stage cv`)
+
+| Model | LCO test-weighted AUC | non-blank weighted AUC | pooled AUC |
+|---|---:|---:|---:|
+| v1 features (90) + LR, CatBoost | 0.99637 | 0.99090 | 0.99486 |
+| v2 features (126) + LR, CatBoost | 0.99639 | 0.99127 | 0.99487 |
+| **v2 + LR + test self-training** | **0.99749** | **0.99369** | **0.99656** |
+
+Earlier LightGBM screening (same LCO): style 53 -> 0.9851, +v1 -> 0.9899, +v2 -> 0.9918
+(no LR); with LR 0.9936 (53) -> 0.9951 (126) -> 0.9967 (+ self-training).
+With CatBoost the v2 features add little once the LR score is present; most of the
+gain comes from self-training. LCO is still optimistic (train cluster 4 is mostly
+wiki-style text, not poems), so only the leaderboard can confirm.
+
+## Run
+
+```bash
+pip install -r submissions/Group_Number_19/requirements-yuchen.lock.txt   # now includes wordfreq
+python submissions/Group_Number_19/yuchen_v2.py --stage features
+python submissions/Group_Number_19/yuchen_v2.py --stage lr        # ~15 min
+python submissions/Group_Number_19/yuchen_v2.py --stage predict   # writes the two submissions
+python submissions/Group_Number_19/yuchen_v2.py --stage cv        # optional, LCO table above
+```
+
+Outputs in `results/yuchen/v2_shift/`: `submission_v2_cat.csv` (inductive) and
+`submission_v2_cat_pseudo.csv` (with test self-training), `lco_results.csv`,
+per-row LCO predictions, `predict_info.json`.
+
+Note for the report: self-training on test text is transductive. It doesn't use
+labels or external models, but confirm with course staff that it is allowed before
+you pick it as a final submission.
+
+AI assistance (v2): Claude (Cowork) diagnosed the shift, implemented v2 features and
+runner, and ran the experiments; results above are copied from the run output.
+
