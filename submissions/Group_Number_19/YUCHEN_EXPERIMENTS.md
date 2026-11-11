@@ -174,3 +174,34 @@ you pick it as a final submission.
 AI assistance (v2): Claude (Cowork) diagnosed the shift, implemented v2 features and
 runner, and ran the experiments; results above are copied from the run output.
 
+## v3: frozen GPT-2 token-probability features (`yuchen_v3.py`)
+
+Added zero-shot detector signals from two frozen causal LMs, gpt2 (124M) and gpt2-medium
+(355M): per-token log-prob mean/std/percentiles, entropy, Fast-DetectGPT analytic score,
+single-model Binoculars-style ratio, rank shares (`yuchen_lm_features.py`, 15 per model),
+plus 5 cross-model ratios. No fine-tuning and no labels from the LM. Computed on one RTX
+2080 Ti on Unicorn (`gpt2_feats.sbatch`, `BS=8`, ~18 min for both models, all splits).
+
+Individually the LM features are weak (best: `lm_logp_std` 0.837 weighted AUC; perplexity
+and Fast-DetectGPT ~0.72 and ~0.52 on no-blank-line text), but CatBoost combines them well:
+
+| Model (same LCO proxy as v2) | test-weighted AUC | non-blank weighted AUC | pooled AUC |
+|---|---|---|---|
+| LM features only (35) | 0.98553 | 0.98479 | 0.97777 |
+| v2 + LR (rerun, this env) | 0.99617 | 0.99090 | 0.99499 |
+| v2 + LM + LR | 0.99884 | 0.99703 | 0.99793 |
+| **v2 + LM + LR + test self-training** | **0.99922** | **0.99804** | **0.99864** |
+
+```bash
+sbatch -p lil --gres=gpu:1 -c 4 --mem=24G gpt2_feats.sbatch   # on Unicorn, from ~/hai; BS=8 on 11 GB cards
+# copy out/{gpt2,gpt2-medium} to results/yuchen/lm_features/, then:
+python submissions/Group_Number_19/yuchen_v3.py --stage cv
+python submissions/Group_Number_19/yuchen_v3.py --stage predict
+```
+
+Outputs in `results/yuchen/v3_lm/`: `submission_v3_cat.csv`, `submission_v3_cat_pseudo.csv`.
+Note for the report: GPT-2 is an external pretrained model used only as a frozen feature
+extractor (no generation, no labeling). Confirm with course staff that this is allowed.
+
+Public LB: `submission_v3_cat_pseudo.csv` = **0.98869** (v2_cat_pseudo was 0.97880, team baseline 0.97543).
+
