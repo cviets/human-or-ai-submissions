@@ -113,6 +113,8 @@ def main() -> None:
                     help="bf16 autocast gave NaN loss from step 1 with transformers 5.22; fp32+TF32 is the default")
     ap.add_argument("--folds", type=int, nargs="*", default=None, help="subset of clusters (default all)")
     ap.add_argument("--skip-full", action="store_true")
+    ap.add_argument("--fixed-split", type=Path, default=None,
+                    help="folds.csv: train on folds 1-4, write fixed_val.csv / fixed_train.csv (report protocol) and stop")
     args = ap.parse_args()
     global NL_MARKER
     NL_MARKER = args.nl_marker == "on"
@@ -129,6 +131,21 @@ def main() -> None:
     assert not np.isnan(fold.astype(float)).any()
     y = tr["label"].to_numpy()
     X, Xte, Xun = prep(tr["text"]), prep(te["text"]), prep(un["text"])
+
+    if args.fixed_split is not None:
+        # Report protocol: train on folds 1-4 of folds.csv (8,000 rows), score fold 0 (2,000 rows)
+        f = tr["id"].map(pd.read_csv(args.fixed_split).set_index("id")["fold"]).to_numpy()
+        tri, vai = np.where(f != 0)[0], np.where(f == 0)[0]
+        t = time.time()
+        model, tok = train([X[i] for i in tri], y[tri], args, device, args.seed + 200)
+        pv = predict(model, tok, [X[i] for i in vai], args, device)
+        ptr = predict(model, tok, [X[i] for i in tri], args, device)
+        pd.DataFrame({"id": tr["id"].iloc[vai].to_numpy(), "label": y[vai], "pred": pv}).to_csv(args.out / "fixed_val.csv", index=False)
+        pd.DataFrame({"id": tr["id"].iloc[tri].to_numpy(), "label": y[tri], "pred": ptr}).to_csv(args.out / "fixed_train.csv", index=False)
+        print(json.dumps(dict(fixed_split=True, n_train=len(tri), n_val=len(vai), train_auc=roc_auc_score(y[tri], ptr),
+                              val_auc=roc_auc_score(y[vai], pv), seconds=round(time.time() - t))), flush=True)
+        print("DONE", flush=True)
+        return
 
     oof_path = args.out / "oof_lco.csv"
     oof = pd.read_csv(oof_path) if oof_path.exists() else pd.DataFrame(

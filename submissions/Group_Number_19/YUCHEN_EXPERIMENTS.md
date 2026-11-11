@@ -1,4 +1,53 @@
-# Yuchen: CPU CatBoost experiments
+# Yuchen's experiments: overview
+
+Every version is a classifier on top of a feature table; **all versions include the
+TF-IDF + logistic-regression score** as one input feature (team configuration: lower-cased
+word 1-3-grams + case-sensitive char 3-5-grams, binary tf, smoothed idf, C=30; cross-fitted
+with 3 inner folds that each refit vocabulary/idf, so training rows get out-of-fold scores).
+
+| Version | Inputs to the classifier | Classifier | Unlabeled / self-training | Model selection | Public LB |
+|---|---|---|---|---|---|
+| Team baseline | 53 team style features + TF-IDF/LR score (54) | LightGBM | none | random 5-fold CV | 0.97543 |
+| v1 | 53 team + 37 new stylometry features + TF-IDF/LR score (91) | CatBoost (+ style/stack blend) | compared, not used in final | fixed fold-0 holdout + inner split | not recorded |
+| v2 | 90 above + 36 topic-free features (word rarity, compressibility, rhyme, line breaks) + TF-IDF/LR (127) | CatBoost, 3 seeds | one round on test texts, thr 0.95 | leave-one-topic-cluster-out (LCO), weighted to test mix | 0.97880 |
+| v3 | v2 + 35 GPT-2 small/medium token-probability features (162) | CatBoost, 3 seeds | same | LCO | 0.98869 |
+| v4 | v3 + 31 Qwen3.5-2B Base/Instruct Binoculars features (**193** = 126 style + 1 TF-IDF/LR + 35 GPT-2 + 31 Qwen) | CatBoost, 3 seeds | one round on `unlabeled.csv` + test texts, thr 0.95 | LCO | 0.99146 |
+| **v4 + RoBERTa (final)** | rank blend 0.9 x v4 + 0.1 x fine-tuned RoBERTa-base | - | - | LCO (0.99953) | **0.99162** |
+
+Validation protocols used below:
+- **LCO** (v2 onward, model selection): 8 k-means topic clusters of train+test text; hold out
+  one cluster at a time; AUROC weighted by each cluster's test/train share, plus the same
+  AUROC on texts without a blank line. Tracks the test genre shift (poetry 35.8% of test vs
+  1.5% of train).
+- **Fixed 2,000-row validation** (v1 and the report section at the end): fold 0 of
+  `folds.py` (SEED 20261109), 8,000 training rows. Required by the report template; every
+  feature model scores ~0.999 here, so it cannot rank them.
+
+| Script | Purpose | Output (`results/yuchen/...`) |
+|---|---|---|
+| `yuchen_experiments.py` | v1 CatBoost runner | `catboost_v1/` |
+| `yuchen_features_v2.py`, `yuchen_v2.py` | v2 features, TF-IDF/LR cross-fit caches, LCO CV, submissions | `v2_shift/` |
+| `yuchen_lm_features.py`, `gpt2_feats.sbatch` | GPT-2 features (GPU) | `lm_features/gpt2*/` |
+| `yuchen_bino_features.py`, `bino_feats.sbatch` | Qwen3.5 Binoculars features (GPU) | `lm_features/qwen35_2b/` |
+| `yuchen_v3.py` | v3/v4 LCO CV and submissions (`--bino` adds Qwen) | `v3_lm/`, `v4_bino/` |
+| `yuchen_semi.py` | self-training pools, LCO learning curve, **final v4 submission** | `semi/`, `v4_bino/` |
+| `yuchen_deberta.py`, `deberta.sbatch`, `yuchen_blend.py` | fine-tuned RoBERTa (DeBERTa failed) and blend | `roberta/`, `blend/` |
+| `yuchen_models.py` | 6 classifiers on the v4 features (LCO) | `models/` |
+| `yuchen_lco_hparams.py` | CatBoost depth / learning-rate check under LCO | `lco_hparams/` |
+| `yuchen_report.py` | report-template experiments on the fixed 2,000-row split | `report/` |
+
+Final submission file: `results/yuchen/blend/submission_blend_w0.1.csv` (public 0.99162), written by
+`yuchen_blend.py --cat-oof results/yuchen/v4_bino/lco_v2+lm+bino+lr+pseudo.csv --deb-dir results/yuchen/roberta/rob_a results/yuchen/roberta/rob_b --cat-test results/yuchen/v4_bino/submission_v4_unl_target.csv`.
+Its v4 part, `results/yuchen/v4_bino/submission_v4_unl_target.csv` (public 0.99146), is written by
+`yuchen_semi.py --stage predict --tag v4 --bino results/yuchen/lm_features/qwen35_2b --out results/yuchen/v4_bino`.
+
+AI tools: v1 was implemented with Codex (see below); v2 onward with Claude Code
+(Claude Opus 5.5). In both cases the assistant proposed and implemented; Yuchen chose
+directions, redirected them and decided what to submit.
+
+---
+
+# v1: CPU CatBoost experiments
 
 These experiments add CatBoost without modifying the team's original LightGBM pipeline.
 The original 53 style features are attributed to the existing team implementation.
@@ -305,6 +354,7 @@ Rank-average blend with v4 (weight = RoBERTa share), LCO:
 A small RoBERTa share helps (w = 0.1); w was picked on the same OOF, so the gain is
 slightly optimistic. Submission: `results/yuchen/blend/submission_blend_w0.1.csv`
 (v4_unl_target ranks x 0.9 + RoBERTa full-fit ranks x 0.1; Spearman 0.9989 with v4).
+Public LB: **0.99162** vs 0.99146 for v4 alone; this blend is the final submission.
 
 ## Classifier comparison on the same v4 features (`yuchen_models.py --stage cv`)
 
@@ -428,3 +478,46 @@ false positives are polished or formulaic human text. Speculation: the model has
 "plain encyclopedic register = human" from Wikipedia/news human text in train. A fix to try:
 genre-matched negatives (AI-written bios/news) or features measuring factual density
 rather than style.
+
+## CatBoost depth / learning rate under LCO (`yuchen_lco_hparams.py`)
+
+The fixed-split grid (report Q1.3) was flat and slightly favoured depth 4 / lr 0.1, so the
+candidates were re-checked under LCO with the v4 features (1 seed; self-training pool =
+`unlabeled.csv` + held-out cluster texts, as in the final recipe):
+
+| depth | lr | LCO weighted AUC | non-blank | + self-training: weighted | non-blank |
+|---|---|---|---|---|---|
+| **6** | **0.05** (final) | 0.99906 | 0.99757 | 0.99932 | 0.99823 |
+| 4 | 0.1 | 0.99901 | 0.99746 | 0.99930 | 0.99819 |
+| 4 | 0.05 | 0.99894 | 0.99727 | - | - |
+| 8 | 0.05 | 0.99888 | 0.99714 | - | - |
+| 6 | 0.1 | 0.99919 | 0.99791 | 0.99939 | 0.99844 |
+
+Depth 4 / lr 0.1 is not better under LCO. All settings lie within 0.0003 (0.0001 with
+self-training), about the size of seed-to-seed variation, so the final model keeps
+depth 6 / lr 0.05 rather than re-tuning on noise.
+
+### Final blend on the fixed split (`yuchen_deberta.py --fixed-split folds.csv`, `yuchen_report.py --stage q4blend`)
+
+RoBERTa-base trained on the same 8,000 rows (same settings as the LCO runs, one RTX 2080
+Ti, 9 min): train AUROC 0.99951, val AUROC **0.99928**, the best single model on this
+random split (CatBoost final recipe 0.99909), but only 0.99520 under LCO. It is strong on
+familiar genres and weaker on held-out ones, which is why the blend gives it weight 0.1.
+
+Final blend (0.9 x CatBoost final recipe + 0.1 x RoBERTa, ranks within each set):
+train AUROC 0.99998, val AUROC **0.99928**. The blend output is a rank score, so errors use
+the threshold that labels the same share AI as CatBoost at P=0.5 (score 0.5055): 1 FP, 10 FN.
+
+| Subgroup | n | Blend AUROC | CatBoost alone | Errors |
+|---|---|---|---|---|
+| < 150 words | 384 | 0.99989 | 0.99978 | 3 |
+| 150-250 words | 1,033 | 0.99964 | 0.99955 | 3 |
+| > 250 words | 583 | 0.99869 | 0.99817 | 5 |
+| no blank line | 1,324 | 0.99785 | 0.99728 | 11 |
+| has blank line | 676 | 1.00000 | 1.00000 | 0 |
+
+The components fail on different passages: RoBERTa gives P(AI) > 0.89 to the AI
+biographies/lists 5010, 8444, 1810 that CatBoost scores ~0, while CatBoost is right on the
+human list page 8925 where RoBERTa is wrong. Only 5401, 3721 (FN) and 3326, 8218 (FP) fool
+both. At weight 0.1 RoBERTa cannot overturn a confident CatBoost score; a stacker that
+learns when to trust it is a possible next step. Files: `results/yuchen/report/q4b_*`.

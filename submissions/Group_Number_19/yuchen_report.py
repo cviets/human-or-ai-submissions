@@ -277,6 +277,8 @@ def q4(S: Split) -> dict:
                  wrong_at_0_5=(E.pred > 0.5) != (E.label == 1))
     E[["id", "error_type", "pred", "wrong_at_0_5", "words", "blank_line", "snippet"]].to_csv(S.out / "q4_errors.csv", index=False)
     v.drop(columns="text").to_csv(S.out / "q4_val_preds.csv", index=False)
+    pd.DataFrame({"id": S.D.tr["id"].iloc[S.tr].to_numpy(), "label": S.y[S.tr], "pred": ptr}).to_csv(
+        S.out / "q4_train_preds.csv", index=False)
     res = dict(train_auroc=auc(S.y[S.tr], ptr), val_auroc=auc(yva, pv),
                n_fp_at_0_5=int(((v.pred > 0.5) & (v.label == 0)).sum()),
                n_fn_at_0_5=int(((v.pred <= 0.5) & (v.label == 1)).sum()), **info)
@@ -285,9 +287,50 @@ def q4(S: Split) -> dict:
     return res
 
 
+def q4_blend(S: Split, transformer_dir: Path, w: float = 0.1) -> dict:
+    """Q4 for the final submission: rank blend (1-w) * CatBoost final recipe + w * RoBERTa, both
+    trained on the same 8,000 rows (yuchen_deberta.py --fixed-split). Ranks are taken within each set."""
+    from scipy.stats import rankdata
+    R = lambda x: (rankdata(x) - 1) / (len(x) - 1)  # noqa: E731
+    out = {}
+    for part in ("val", "train"):
+        c = pd.read_csv(S.out / f"q4_{part}_preds.csv")
+        t = pd.read_csv(transformer_dir / f"fixed_{part}.csv").set_index("id").loc[c["id"]]
+        assert (t["label"].to_numpy() == c["label"].to_numpy()).all()
+        c["cat_pred"], c["roberta_pred"] = c["pred"], t["pred"].to_numpy()
+        c["pred"] = (1 - w) * R(c["cat_pred"]) + w * R(c["roberta_pred"])
+        out[part] = c
+    v = out["val"]
+    text = S.D.tr.set_index("id").loc[v["id"], "text"].to_numpy()
+    res = dict(blend_weight=w, train_auroc=auc(out["train"].label, out["train"].pred), val_auroc=auc(v.label, v.pred),
+               catboost_val_auroc=auc(v.label, v.cat_pred), roberta_val_auroc=auc(v.label, v.roberta_pred),
+               roberta_train_auroc=auc(out["train"].label, out["train"].roberta_pred))
+    # the blend output is a rank score, not a probability: pick errors by rank (as many FPs/FNs as CatBoost at 0.5)
+    thr = float(np.quantile(v.pred, 1 - (v.cat_pred > 0.5).mean()))
+    res.update(threshold_rank=thr, n_fp=int(((v.pred > thr) & (v.label == 0)).sum()),
+               n_fn=int(((v.pred <= thr) & (v.label == 1)).sum()))
+    groups = []
+    for col in ("length_bin", "blank_line"):
+        for g, d in v.groupby(col, observed=True):
+            groups.append(dict(group=f"{col}={g}", n=len(d), auroc=auc(d.label, d.pred) if d.label.nunique() > 1 else None,
+                               catboost_auroc=auc(d.label, d.cat_pred) if d.label.nunique() > 1 else None,
+                               errors=int(((d.pred > thr) != (d.label == 1)).sum())))
+    pd.DataFrame(groups).to_csv(S.out / "q4b_subgroups.csv", index=False)
+    v = v.assign(snippet=pd.Series(text).str.replace(r"\s+", " ", regex=True).str[:140].to_numpy())
+    fp = v[v.label == 0].sort_values("pred", ascending=False).head(8).assign(error_type="FP")
+    fn = v[v.label == 1].sort_values("pred").head(8).assign(error_type="FN")
+    pd.concat([fp, fn])[["id", "error_type", "pred", "cat_pred", "roberta_pred", "words", "blank_line", "snippet"]].to_csv(
+        S.out / "q4b_errors.csv", index=False)
+    json.dump(res, open(S.out / "q4b_final_blend.json", "w"), indent=2)
+    print(json.dumps(res), flush=True)
+    return res
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--stage", choices=("q1", "q1hp", "q2", "q3", "q4", "all"), default="all")
+    ap.add_argument("--stage", choices=("q1", "q1hp", "q2", "q3", "q4", "q4blend", "all"), default="all")
+    ap.add_argument("--transformer", type=Path, default=ROOT / "results" / "yuchen" / "roberta" / "fixed",
+                    help="yuchen_deberta.py --fixed-split output (for --stage q4blend)")
     ap.add_argument("--data", type=Path, default=ROOT / "data")
     ap.add_argument("--v2", type=Path, default=ROOT / "results" / "yuchen" / "v2_shift")
     ap.add_argument("--lm", type=Path, default=ROOT / "results" / "yuchen" / "lm_features")
@@ -300,6 +343,8 @@ def main() -> None:
     stages = ["q1", "q1hp", "q2", "q3", "q4"] if a.stage == "all" else [a.stage]
     for s in stages:
         print(f"=== {s}", flush=True)
+        if s == "q4blend":
+            q4_blend(S, a.transformer); continue
         {"q1": q1, "q1hp": q1_hparams, "q2": q2, "q3": q3, "q4": q4}[s](S)
 
 
