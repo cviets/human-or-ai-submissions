@@ -28,7 +28,7 @@ cd submissions/Group_Number_19
 DATA=/path/to/data
 ```
 
-## Predict (writes the Kaggle submission)
+## Predict using LightGBM model
 
 ```bash
 python predict.py --train $DATA/train.csv --test $DATA/test.csv --out submission.csv
@@ -37,10 +37,10 @@ python predict.py --train $DATA/train.csv --test $DATA/test.csv --out submission
 Fits the full pipeline on all of `train.csv` (~1 min on a laptop CPU) and writes
 `id,label` with P(AI) for each test row.
 
-## Validate
+## Validation of LightGBM
 
 ```bash
-# Final model, fixed stratified 5-fold CV (also reports logreg alone and style-only LightGBM)
+# LightGBM model, fixed stratified 5-fold CV (also reports logreg alone and style-only LightGBM)
 python lgbm_stack.py --train $DATA/train.csv
 
 # Same, leave-one-topic-cluster-out CV (8 k-means topic clusters)
@@ -96,12 +96,11 @@ No AI model or commercial LLM API was used to label or classify competition text
 Qwen3.5 appear only as frozen, open-weight models run locally to compute token-probability
 features (see `YUCHEN_EXPERIMENTS.md`).
 
-**Team baseline (TF-IDF, style features, LightGBM stack).** TODO (teammates: confirm for report
-Q6.3). Draft: Claude Code (Claude Opus 5.5) was used to write the pipeline code, run
+**Team baseline (TF-IDF, style features, LightGBM stack).** Claude Code (Claude Opus 5.5) was used to write the pipeline code, run
 cross-validation experiments, and analyze results (TF/IDF variants, C sweeps, n-gram ranges,
 linear SVM, style features, LightGBM stacking, train/test shift diagnostics). We reviewed the
 code, chose which experiments to run, and checked results against the Kaggle public
-leaderboard, which overturned one of the assistant's diagnoses (layout stripping).
+leaderboard.
 
 **Yuchen's CatBoost line (`yuchen_*.py`).** Codex (v1) and Claude Code (Claude Opus 5.5,
 v2 onward) proposed ideas, wrote the code and ran the experiments. Yuchen chose among the proposals and suggested
