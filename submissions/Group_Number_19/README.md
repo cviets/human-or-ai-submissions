@@ -3,9 +3,13 @@
 **Team members:** TODO: names (NetIDs)
 **Kaggle team name:** `Group_Number_19`
 
-Final model: LightGBM on 53 hand-crafted style features plus the out-of-fold score of a
+Team baseline: LightGBM on 53 hand-crafted style features plus the out-of-fold score of a
 TF-IDF logistic regression (word 1–3 + char 3–5 n-grams, binary tf, smoothed idf, C=30).
 Public leaderboard AUROC: **0.9754**.
+
+**Final submission (Yuchen's CatBoost line):** CatBoost on style + TF-IDF/LR + GPT-2 + Qwen3.5
+features with self-training, rank-blended with a fine-tuned RoBERTa-base (weight 0.1).
+Public leaderboard AUROC: **0.99162**. Pipeline, commands and all experiments: `YUCHEN_EXPERIMENTS.md`.
 
 ## Setup
 
@@ -89,8 +93,19 @@ Lessons:
 
 ## AI assistance
 
-TODO: edit to match report Q6.3. Draft: Claude Code (Claude Opus 5.5) was used to write the
-pipeline code, run cross-validation experiments, and analyze results (TF/IDF variants,
-C sweeps, n-gram ranges, linear SVM, style features, LightGBM stacking, train/test shift
-diagnostics). We reviewed the code, chose which experiments to run, and checked results against
-the Kaggle public leaderboard, which overturned one of the assistant's diagnoses (layout stripping).
+No AI model or commercial LLM API was used to label or classify competition texts. GPT-2 and
+Qwen3.5 appear only as frozen, open-weight models run locally to compute token-probability
+features (see `YUCHEN_EXPERIMENTS.md`).
+
+**Team baseline (TF-IDF, style features, LightGBM stack).** TODO (teammates: confirm for report
+Q6.3). Draft: Claude Code (Claude Opus 5.5) was used to write the pipeline code, run
+cross-validation experiments, and analyze results (TF/IDF variants, C sweeps, n-gram ranges,
+linear SVM, style features, LightGBM stacking, train/test shift diagnostics). We reviewed the
+code, chose which experiments to run, and checked results against the Kaggle public
+leaderboard, which overturned one of the assistant's diagnoses (layout stripping).
+
+**Yuchen's CatBoost line (`yuchen_*.py`).** Codex (v1) and Claude Code (Claude Opus 5.5,
+v2 onward) proposed ideas, wrote the code and ran the experiments. Yuchen chose among the proposals and suggested
+alternatives (e.g. using the lab GPU cluster, Qwen3.5 instead of Qwen2.5, adding
+`unlabeled.csv`, trying a fine-tuned transformer and other classifiers), and decided what to
+submit to Kaggle.
