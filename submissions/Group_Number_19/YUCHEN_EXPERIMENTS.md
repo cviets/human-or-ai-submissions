@@ -306,3 +306,26 @@ A small RoBERTa share helps (w = 0.1); w was picked on the same OOF, so the gain
 slightly optimistic. Submission: `results/yuchen/blend/submission_blend_w0.1.csv`
 (v4_unl_target ranks x 0.9 + RoBERTa full-fit ranks x 0.1; Spearman 0.9989 with v4).
 
+## Classifier comparison on the same v4 features (`yuchen_models.py --stage cv`)
+
+Same 193 inputs (126 style + LR score + 35 GPT-2 + 31 Qwen Binoculars), same LCO folds,
+no self-training, 1 seed. Only the learner changes.
+
+| Classifier | test-weighted AUC | non-blank | pooled | held-out poetry cluster (c4) |
+|---|---|---|---|---|
+| Logistic regression (standardized) | 0.99841 | 0.99626 | 0.99754 | - |
+| MLP 256-128 (quantile-normalized) | 0.99886 | 0.99705 | 0.99827 | 1.0000 |
+| Random forest (600 trees) | 0.99795 | 0.99477 | 0.99746 | - |
+| Extra trees (800 trees) | 0.99843 | 0.99602 | 0.99794 | - |
+| LightGBM (early-stopped) | 0.99399 | 0.98993 | 0.99797 | 0.9976 |
+| **CatBoost (v4)** | **0.99906** | **0.99757** | **0.99855** | **1.0000** |
+
+- CatBoost is the best single learner; an MLP on quantile-normalized features is a close second.
+- LightGBM is as good as CatBoost on the in-distribution clusters (pooled 0.99797) but drops
+  on the held-out poetry cluster (0.9976 vs 1.0); because poetry is 36% of test, the
+  test-weighted score falls to 0.994. CatBoost's symmetric (oblivious) trees extrapolate
+  more smoothly to a genre missing from training than LightGBM's leaf-wise trees.
+- Linear LR is already 0.998 on these features: most of the gain is in the features, not the learner.
+- Rank-average blends: best pair MLP + CatBoost 0.99936 (vs 0.99906). Adding to v4 with
+  self-training: v4 0.6 + MLP 0.3 + RoBERTa 0.1 = 0.99956 vs v4 + RoBERTa 0.1 = 0.99953 vs
+  v4 0.99939 -- differences of 3e-5 are within noise, so the MLP is not added to the submission.
