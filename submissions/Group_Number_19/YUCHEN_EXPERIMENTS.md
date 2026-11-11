@@ -521,3 +521,16 @@ biographies/lists 5010, 8444, 1810 that CatBoost scores ~0, while CatBoost is ri
 human list page 8925 where RoBERTa is wrong. Only 5401, 3721 (FN) and 3326, 8218 (FP) fool
 both. At weight 0.1 RoBERTa cannot overturn a confident CatBoost score; a stacker that
 learns when to trust it is a possible next step. Files: `results/yuchen/report/q4b_*`.
+
+## Is GPT-2 redundant with Qwen3.5? (LCO ablation)
+
+| Features (CatBoost, + TF-IDF/LR score) | LCO weighted | non-blank | + self-training |
+|---|---|---|---|
+| v2 style only | 0.99617 | 0.99090 | - |
+| v2 + Qwen3.5 (no GPT-2) | 0.99860 | 0.99638 | 0.99898 |
+| v2 + GPT-2 (no Qwen3.5) | 0.99884 | 0.99703 | - |
+| v2 + GPT-2 + Qwen3.5 (v4) | 0.99906 | 0.99757 | 0.99939 |
+
+No: dropping GPT-2 raises the remaining error by about two thirds, and GPT-2 alone is
+slightly stronger than the Qwen features. Both measure predictability, but the two model
+families err on different passages. Results: `results/yuchen/v4_bino/ablation_gpt2_vs_qwen.csv`.
