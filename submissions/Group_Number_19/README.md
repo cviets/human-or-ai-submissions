@@ -89,8 +89,19 @@ Lessons:
 
 ## AI assistance
 
-TODO: edit to match report Q6.3. Draft: Claude Code (Claude Opus 5.5) was used to write the
-pipeline code, run cross-validation experiments, and analyze results (TF/IDF variants,
-C sweeps, n-gram ranges, linear SVM, style features, LightGBM stacking, train/test shift
-diagnostics). We reviewed the code, chose which experiments to run, and checked results against
-the Kaggle public leaderboard, which overturned one of the assistant's diagnoses (layout stripping).
+No AI model or commercial LLM API was used to label or classify competition texts. GPT-2 and
+Qwen3.5 appear only as frozen, open-weight models run locally to compute token-probability
+features (see `YUCHEN_EXPERIMENTS.md`).
+
+**Team baseline (TF-IDF, style features, LightGBM stack).** TODO (teammates: confirm for report
+Q6.3). Draft: Claude Code (Claude Opus 5.5) was used to write the pipeline code, run
+cross-validation experiments, and analyze results (TF/IDF variants, C sweeps, n-gram ranges,
+linear SVM, style features, LightGBM stacking, train/test shift diagnostics). We reviewed the
+code, chose which experiments to run, and checked results against the Kaggle public
+leaderboard, which overturned one of the assistant's diagnoses (layout stripping).
+
+**Yuchen's CatBoost line (`yuchen_*.py`).** Claude Code (Claude Opus 5.5) proposed ideas,
+wrote the code and ran the experiments. Yuchen chose among the proposals and suggested
+alternatives (e.g. using the lab GPU cluster, Qwen3.5 instead of Qwen2.5, adding
+`unlabeled.csv`, trying a fine-tuned transformer and other classifiers), and decided what to
+submit to Kaggle.
