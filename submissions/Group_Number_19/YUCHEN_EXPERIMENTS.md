@@ -205,3 +205,74 @@ extractor (no generation, no labeling). Confirm with course staff that this is a
 
 Public LB: `submission_v3_cat_pseudo.csv` = **0.98869** (v2_cat_pseudo was 0.97880, team baseline 0.97543).
 
+## v4: + Qwen3.5-2B Binoculars features, and learning from unlabeled data
+
+**Binoculars features** (`yuchen_bino_features.py`, `bino_feats.sbatch`): observer
+Qwen3.5-2B-Base, performer Qwen3.5-2B (instruct), same tokenizer. Per text: Binoculars
+score log-PPL_obs / X-PPL(perf->obs), cross-model Fast-DetectGPT, per-model perplexity /
+entropy / rank stats, instruct-vs-base log-prob gap (31 features). Frozen open-weight
+models used locally as feature extractors (no commercial API, no generation, no labeling).
+One RTX A6000, bf16, ~11 min for train (torch built for CUDA 12.8; cu13x wheels fail on
+nodes with a 12.8 driver).
+
+Zero-shot the Qwen Binoculars score is weak here (weighted AUC 0.689, ~0.50 on text
+without blank lines), weaker than GPT-2's `logp_std` (0.837). Inside CatBoost it still helps:
+
+| Model (LCO, 1 seed) | test-weighted AUC | non-blank weighted AUC | pooled AUC |
+|---|---|---|---|
+| Binoculars features only | 0.96598 | 0.97243 | 0.96394 |
+| GPT-2 + Binoculars features only | 0.99216 | 0.99073 | 0.98885 |
+| v3: v2 + GPT-2 + LR | 0.99884 | 0.99703 | 0.99793 |
+| v4: v3 + Binoculars | 0.99906 | 0.99757 | 0.99855 |
+| v3 + self-training (target) | 0.99922 | 0.99804 | 0.99864 |
+| **v4 + self-training (target)** | **0.99939** | **0.99842** | **0.99903** |
+
+**Learning from unlabeled data** (`yuchen_semi.py --stage semi`, v3 features): one round
+of self-training, pseudo-labels for P>0.95 / P<0.05, pool varied:
+
+| Pseudo-label pool | test-weighted AUC | non-blank | mean rows pseudo-labeled |
+|---|---|---|---|
+| none (supervised) | 0.99884 | 0.99703 | 0 |
+| unlabeled.csv | 0.99897 | 0.99737 | 2851 |
+| target texts (held-out cluster / test.csv) | 0.99922 | 0.99804 | 1138 |
+| unlabeled.csv + target | 0.99923 | 0.99802 | 3989 |
+
+Why unlabeled.csv helps little: it looks like train, not test. A TF-IDF classifier
+trained to separate train from test texts (5-fold AUC 0.738) calls 6.8% of train, 44.6%
+of test and only 11.1% of unlabeled rows "test-like". Self-training only helps where it
+adds the shifted domain, which only the target texts provide.
+
+**Error analysis** (v4 + self-training, LCO OOF, `results/yuchen/v4_bino/error_analysis_oof.csv`):
+- Blank lines are almost a label in train (P(AI | blank line) = 0.995 vs 0.254 without).
+  AUC is 0.99986 on texts with a blank line and 0.99722 without; 103 of the 107 errors at
+  threshold 0.5 are on texts without blank lines. Error rate is highest for short texts
+  without blank lines (<100 words: 6.3%) and for long ones (>300 words: 2.9%).
+- 69 false negatives (AI called human) vs 38 false positives. The confident misses are
+  AI text written in Wikipedia-biography / encyclopedic style (cluster 3, "born,
+  university, american" -- the weakest cluster, AUC 0.99732) and dry technical
+  abstracts; the confident false positives are short, enthusiastic human movie reviews.
+
+Public LB: `submission_v4_unl_target.csv` (v4 features, self-training on unlabeled.csv +
+test) = **0.99146** (v3 0.98869, v2 0.97880, team baseline 0.97543).
+
+## Effect of training-set size (`yuchen_semi.py --stage curve`)
+
+Each LCO training fold is subsampled (stratified) to a fraction of its ~8,750 texts; the
+TF-IDF/LR is refit on the subsample; 2 repeats below 100%. Test-weighted LCO AUC
+(non-blank-line subset in parentheses). Plot: `results/yuchen/semi/learning_curve.png`.
+
+| train texts | TF-IDF + LR | style feats (CatBoost) | GPT-2 LM feats (CatBoost) | combined v3 |
+|---|---|---|---|---|
+| 438 (5%) | 0.782 (0.852) | 0.964 (0.912) | 0.931 (0.906) | 0.9807 (0.954) |
+| 875 (10%) | 0.829 (0.896) | 0.974 (0.932) | 0.971 (0.963) | 0.9907 (0.977) |
+| 2,188 (25%) | 0.870 (0.929) | 0.986 (0.964) | 0.983 (0.981) | 0.9972 (0.994) |
+| 4,375 (50%) | 0.900 (0.945) | 0.990 (0.973) | 0.985 (0.984) | 0.9985 (0.996) |
+| 8,750 (100%) | 0.916 (0.953) | 0.992 (0.979) | 0.986 (0.985) | 0.9988 (0.997) |
+
+- TF-IDF + LR is the most data-hungry and the weakest under topic shift (it learns topic
+  words); it is still rising at 100%.
+- LM features saturate by ~25% of the data (they measure predictability, not topic), and
+  on texts without blank lines they beat the style features from 10% of the data on.
+- The families are complementary: the combined model with 25% of the data (0.9972) beats
+  every single family trained on all of it.
+
