@@ -1,6 +1,5 @@
 # Group_Number_19 — Human or AI?
 
-**Team members:** TODO: names (NetIDs)
 **Kaggle team name:** `Group_Number_19`
 
 Team baseline: LightGBM on 53 hand-crafted style features plus the out-of-fold score of a
