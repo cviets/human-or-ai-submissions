@@ -329,3 +329,102 @@ no self-training, 1 seed. Only the learner changes.
 - Rank-average blends: best pair MLP + CatBoost 0.99936 (vs 0.99906). Adding to v4 with
   self-training: v4 0.6 + MLP 0.3 + RoBERTa 0.1 = 0.99956 vs v4 + RoBERTa 0.1 = 0.99953 vs
   v4 0.99939 -- differences of 3e-5 are within noise, so the MLP is not added to the submission.
+
+## Report protocol: fixed 2,000-row validation set (`yuchen_report.py`)
+
+As required by the report template: validation = fold 0 of the team split (`folds.py`,
+SEED 20261109; 2,000 rows, 1,000 per class, the same rows as v1); training partition = the
+other 8,000 rows. Hyperparameters and early stopping use an inner 20% split of the
+training partition only. Outputs: `results/yuchen/report/`.
+
+**Q1.2 Model comparison**
+
+| Model | Representation | Train AUROC | Val AUROC | Train time |
+|---|---|---|---|---|
+| TF-IDF + logistic regression (C=30) | word 1-3 + char 3-5 n-gram TF-IDF | 1.0000 | 0.97149 | ~15 s |
+| LightGBM (team baseline) | 53 style features + LR score | 0.99993 | 0.99926 | 3 s |
+| CatBoost (v2) | 126 style features + LR score | 0.99988 | 0.99874 | 3 s |
+| CatBoost (v4) | 126 style + LR + 35 GPT-2 + 31 Qwen3.5 | 0.99997 | 0.99925 | 6 s |
+| MLP 256-128 | same 193 inputs, quantile-normalized | 0.99996 | 0.99900 | 1 s |
+
+(The LM features themselves cost ~18 min (GPT-2) and ~15 min (Qwen) of GPU time once.)
+On a random in-distribution split every feature-based model is at 0.999+ and the team
+LightGBM ties v4 CatBoost, yet on the public leaderboard they score 0.9754 vs 0.9915. The
+random split cannot see the test genre shift; that is why model selection used the
+leave-cluster-out (LCO) protocol above, where v4 CatBoost leads (0.99906 vs 0.99399 for LightGBM).
+
+**Q1.3 Hyperparameters** (selected on the inner split; validation shown only for reference)
+
+| Model | Grid | Best on inner split | Inner AUROC | Val AUROC |
+|---|---|---|---|---|
+| CatBoost (v4 features) | depth {4, 6, 8} x learning rate {0.03, 0.05, 0.1}, early stopping (150 rounds) | depth 4, lr 0.1 | 0.99925 | 0.99928 |
+| MLP (v4 features) | hidden {(128), (256,128)} x L2 alpha {1e-4, 1e-3, 1e-2} | (256,128), alpha 1e-4 | 0.99953 | 0.99949 |
+
+All 9 CatBoost settings fall within 0.9985-0.9992 inner AUROC, so the model is insensitive
+to them; the final model keeps depth 6 / lr 0.05, which was chosen earlier under LCO.
+
+**Q2.1 Training-set size** (CatBoost, v4 features; TF-IDF/LR refit on each subsample;
+plot `results/yuchen/report/learning_curve_fixed_val.png`)
+
+| Training rows | Train AUROC | Val AUROC | TF-IDF + LR val AUROC |
+|---|---|---|---|
+| 500 | 0.99798 | 0.98873 | 0.91045 |
+| 1,000 | 0.99877 | 0.99527 | 0.93464 |
+| 2,000 | 0.99998 | 0.99883 | 0.95191 |
+| 5,000 | 0.99998 | 0.99903 | 0.96411 |
+| 8,000 | 0.99997 | 0.99925 | 0.97149 |
+
+The train/validation gap closes from 0.009 (500 rows) to 0.0007 (8,000): mild overfitting
+at small sizes, saturation after ~2,000 rows. TF-IDF + LR keeps rising, so it would benefit
+from more labels; the feature model would not, in distribution.
+
+**Q3 Unlabeled data** (self-training on `unlabeled.csv`; validation rows are never in
+the teacher's training data or in the pseudo-label pool)
+
+| Method | Val AUROC | Pseudo-labeled rows | Teacher accuracy on equally confident val rows |
+|---|---|---|---|
+| Supervised baseline | 0.99925 | 0 | - |
+| Self-training, threshold 0.90 | 0.99906 | 2,913 / 3,000 | 99.80% |
+| Self-training, threshold 0.95 | 0.99904 | 2,878 / 3,000 | 99.85% |
+| Self-training, threshold 0.98 | 0.99895 | 2,817 / 3,000 | 99.84% |
+
+It did not help in distribution (-0.0002): the confident pseudo-labels are ~99.8% right
+(so ~5 wrong labels), but `unlabeled.csv` looks like train (adversarial check above),
+so they repeat what the labeled data already says. Under LCO, where the held-out genre is
+new, unlabeled self-training helped slightly (0.99884 -> 0.99897) and self-training on
+the target texts helped more (-> 0.99922).
+
+**Q4 Final model** (v4 features, CatBoost 3 seeds, self-training on unlabeled + test texts,
+refit on the 8,000-row partition): train AUROC 0.99999, val AUROC 0.99909. At threshold 0.5:
+3 false positives, 12 false negatives.
+
+| Subgroup | n | AI share | Val AUROC | Errors at 0.5 |
+|---|---|---|---|---|
+| < 150 words | 384 | 0.59 | 0.99978 | 3 |
+| 150-250 words | 1,033 | 0.43 | 0.99955 | 5 |
+| > 250 words | 583 | 0.57 | 0.99817 | 7 |
+| no blank line | 1,324 | 0.25 | 0.99728 | 14 |
+| has blank line | 676 | 0.99 | 1.00000 | 1 |
+
+Errors (`q4_errors.csv`; only 3 FPs exceed 0.5, so the next-highest-scored human texts are listed):
+
+| ID | Type | P(AI) | Hypothesis |
+|---|---|---|---|
+| 3326 | FP | 0.850 | Polished, superlative movie review ("Academy Award winning war epic") reads like LLM prose |
+| 46 | FP | 0.759 | Wikipedia biography lead with dates and alternate spellings, a format AI bios in train imitate |
+| 8218 | FP | 0.506 | Human news text that contains a blank line, the strongest AI cue in train |
+| 3199 | FP (0.46) | 0.465 | Forum help request with very regular sentences |
+| 2290 | FP (0.43) | 0.431 | Short, encyclopedic military-unit stub |
+| 5010 | FN | 0.001 | AI Wikipedia-style actress bio, incl. a citation artifact ("California1") |
+| 1810 | FN | 0.001 | AI infobox-like list ("Dates of existence:", "Capital city") with no prose cues |
+| 5401 | FN | 0.002 | AI news story in plain BBC style, no blank lines |
+| 8444 | FN | 0.044 | AI Wikipedia-style politician bio |
+| 9767 | FN | 0.097 | AI casual tech-forum post with slang ("gone AWOL") |
+| 2857 | FN | 0.173 | AI math abstract in dense technical register |
+
+Observed pattern: 14 of 15 errors are on texts without a blank line; false negatives are
+mostly AI text that imitates encyclopedic or news formats (factual, low-emotion, list-like),
+false positives are polished or formulaic human text. Speculation: the model has learned
+"plain encyclopedic register = human" from Wikipedia/news human text in train. A fix to try:
+genre-matched negatives (AI-written bios/news) or features measuring factual density
+rather than style.
