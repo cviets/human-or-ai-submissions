@@ -1,11 +1,14 @@
-"""Rank-average blend of the v4 CatBoost and fine-tuned DeBERTa, chosen on LCO OOF.
+"""Rank-average blend of the v4 CatBoost and the fine-tuned transformer (RoBERTa-base), chosen on LCO OOF.
 
   python submissions/Group_Number_19/yuchen_blend.py \
       --cat-oof results/yuchen/v4_bino/lco_v2+lm+bino+lr+pseudo.csv \
-      --deb-dir results/yuchen/deberta_v3_base \
+      --deb-dir results/yuchen/roberta/rob_a results/yuchen/roberta/rob_b \
       --cat-test results/yuchen/v4_bino/submission_v4_unl_target.csv
-Reports test-weighted / non-blank LCO AUC for DeBERTa alone and for blend weights
-w in [0, 1] (w = DeBERTa share), and writes submission_blend_w{w}.csv for the best w.
+--deb-dir takes one or more yuchen_deberta.py output folders (the RoBERTa run was split
+into two GPU jobs: folds 0-3 and folds 4-7 + full fit); their out-of-fold predictions are
+merged. Reports test-weighted / non-blank LCO AUC for the transformer alone and for blend
+weights w in [0, 1] (w = transformer share), and writes submission_blend_w{w}.csv for the
+best w (the final Kaggle submission is submission_blend_w0.1.csv, public AUROC 0.99162).
 """
 from __future__ import annotations
 
@@ -27,10 +30,22 @@ def rank(x):
     return (rankdata(x) - 1) / (len(x) - 1)
 
 
+def merge_runs(dirs: list[Path], test_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Combine the per-fold OOF predictions of several yuchen_deberta.py runs; take the full-fit test file."""
+    oofs = [pd.read_csv(d / "oof_lco.csv") for d in dirs]
+    oof = oofs[0].copy()
+    for o in oofs[1:]:
+        assert (o["id"].to_numpy() == oof["id"].to_numpy()).all()
+        oof["pred"] = oof["pred"].fillna(o["pred"])
+    tests = [d / test_name for d in dirs if (d / test_name).exists()]
+    assert len(tests) == 1, f"expected exactly one {test_name} among {dirs}"
+    return oof, pd.read_csv(tests[0])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cat-oof", type=Path, required=True)
-    ap.add_argument("--deb-dir", type=Path, required=True)
+    ap.add_argument("--deb-dir", type=Path, nargs="+", required=True)
     ap.add_argument("--cat-test", type=Path, required=True)
     ap.add_argument("--deb-test", default="test_full.csv")
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "yuchen" / "blend")
@@ -40,7 +55,8 @@ def main() -> None:
     cl = pd.read_csv(HERE / "clusters.csv")
     sh = pd.crosstab(cl["cluster"], cl["split"], normalize="columns")
     c = pd.read_csv(a.cat_oof).set_index("id").loc[tr["id"]]
-    d = pd.read_csv(a.deb_dir / "oof_lco.csv").set_index("id").loc[tr["id"]]
+    oof_all, dt = merge_runs(a.deb_dir, a.deb_test)
+    d = oof_all.set_index("id").loc[tr["id"]]
     assert d["pred"].notna().all(), "transformer OOF incomplete"
     y = tr["label"].to_numpy()
     w_test = c["cluster"].map(sh["test"] / sh["train"]).to_numpy()
@@ -60,7 +76,7 @@ def main() -> None:
                                        for k, g in d.groupby("cluster") if g["label"].nunique() > 1})
     R.to_csv(a.out / "blend_lco.csv", index=False)
     best = R.loc[R["weighted_auc"].idxmax(), "w_deberta"]
-    ct = pd.read_csv(a.cat_test); dt = pd.read_csv(a.deb_dir / a.deb_test)
+    ct = pd.read_csv(a.cat_test)
     assert (ct["id"].to_numpy() == dt["id"].to_numpy()).all()
     for w in sorted({best, 0.3, 0.5}):
         p = (1 - w) * rank(ct["label"].to_numpy()) + w * rank(dt["label"].to_numpy())
