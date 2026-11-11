@@ -276,3 +276,33 @@ TF-IDF/LR is refit on the subsample; 2 repeats below 100%. Test-weighted LCO AUC
 - The families are complementary: the combined model with 25% of the data (0.9972) beats
   every single family trained on all of it.
 
+## Fine-tuned transformer (RoBERTa-base) and blend (`yuchen_deberta.py`, `yuchen_blend.py`)
+
+End-to-end fine-tuning of a pretrained encoder, same LCO protocol (8 fits on 7 clusters,
+predict the held-out one) + one fit on all data for test. 2 epochs, lr 2e-5, batch 8 x 2
+accumulation, max 512 tokens, fp32, one RTX 2080 Ti per job (~9 min per fit).
+DeBERTa-v3-base was tried first: with transformers 5.22 its loss became NaN at the second
+optimizer step in both bf16 and fp32 (first loss ~0.70), so it was dropped for
+FacebookAI/roberta-base, whose byte-level BPE also keeps newlines as tokens (no marker needed).
+
+RoBERTa alone: LCO test-weighted AUC 0.99520 (non-blank 0.98927) -- below v4 CatBoost
+(0.99939) and below every CatBoost variant with LM features, despite seeing raw text.
+Per held-out cluster: 0.992 recipes, 0.997 science, 0.994 forum, 0.993 bios, 0.999
+poetry, 1.000 CV papers, 0.986 movie reviews, 0.996 news. On test its ranking agrees
+only moderately with v4 (Spearman 0.857), i.e. it makes different mistakes.
+
+Rank-average blend with v4 (weight = RoBERTa share), LCO:
+
+| w | test-weighted AUC | non-blank | pooled |
+|---|---|---|---|
+| 0.0 (v4 alone) | 0.99939 | 0.99842 | 0.99903 |
+| **0.1** | **0.99953** | **0.99879** | **0.99915** |
+| 0.2 | 0.99945 | 0.99861 | 0.99899 |
+| 0.3 | 0.99932 | 0.99831 | 0.99875 |
+| 0.5 | 0.99886 | 0.99721 | 0.99794 |
+| 1.0 (RoBERTa alone) | 0.99520 | 0.98927 | 0.99212 |
+
+A small RoBERTa share helps (w = 0.1); w was picked on the same OOF, so the gain is
+slightly optimistic. Submission: `results/yuchen/blend/submission_blend_w0.1.csv`
+(v4_unl_target ranks x 0.9 + RoBERTa full-fit ranks x 0.1; Spearman 0.9989 with v4).
+
