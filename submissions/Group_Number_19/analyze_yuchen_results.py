@@ -8,7 +8,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, log_loss, accuracy_score
 
 
 def main():
@@ -19,9 +19,24 @@ def main():
     args=parser.parse_args()
     records=json.loads((args.out/'metrics.json').read_text())
     best=json.loads((args.out/'best_style.json').read_text())
+    blend=json.loads((args.out/'blend_selection.json').read_text())
+    # Validate the exact three-seed blend recipe used for the final CSV.
+    left=pd.read_csv(args.out/f'val_{blend["left"]}_3seed.csv')
+    right=pd.read_csv(args.out/f'val_{blend["right"]}_3seed.csv')
+    np.testing.assert_array_equal(left.id,right.id)
+    w=blend['stack_weight']
+    final_blend=left.copy()
+    final_blend['pred']=(1-w)*left.pred+w*right.pred
+    final_blend.to_csv(args.out/'val_cat_blend_3seed.csv',index=False)
+    final_record={'model':'cat_blend_3seed','auc':float(roc_auc_score(final_blend.label,final_blend.pred)),
+        'logloss':float(log_loss(final_blend.label,final_blend.pred)),
+        'accuracy':float(accuracy_score(final_blend.label,final_blend.pred>=0.5)),
+        'inner_auc':None,'seconds':None,'config':{'weight_selected_on_single_seed_inner_predictions':w}}
+    records=[r for r in records if r['model']!='cat_blend_3seed']+[final_record]
+    (args.out/'metrics.json').write_text(json.dumps(records,indent=2)+'\n')
     names=['cat_style','cat_extended',best['model']+'_lr','cat_blend',
            'cat_pseudo_t0.98','cat_pseudo_t0.95',best['model']+'_3seed',
-           best['model']+'_lr_3seed','reference_lgbm_lr']
+           best['model']+'_lr_3seed','cat_blend_3seed','reference_lgbm_lr']
     names=list(dict.fromkeys(n for n in names if (args.out/f'val_{n}.csv').exists()))
     predictions={n:pd.read_csv(args.out/f'val_{n}.csv') for n in names}
     ref=predictions['reference_lgbm_lr']
@@ -32,11 +47,14 @@ def main():
     rng=np.random.default_rng(20261110)
     positive=np.flatnonzero(y==1); negative=np.flatnonzero(y==0)
     boot={n:[] for n in names if n!='reference_lgbm_lr'}
+    feature_deltas=[]
     for _ in range(1000):
         idx=np.r_[rng.choice(positive,len(positive),replace=True),rng.choice(negative,len(negative),replace=True)]
         base=roc_auc_score(y[idx],ref.pred.to_numpy()[idx])
         for n in boot:
             boot[n].append(roc_auc_score(y[idx],predictions[n].pred.to_numpy()[idx])-base)
+        feature_deltas.append(roc_auc_score(y[idx],predictions['cat_extended'].pred.to_numpy()[idx])-
+                              roc_auc_score(y[idx],predictions['cat_style'].pred.to_numpy()[idx]))
     intervals=[]
     base_auc=roc_auc_score(y,ref.pred)
     for n,values in boot.items():
@@ -44,6 +62,10 @@ def main():
         intervals.append({'model':n,'reference':'reference_lgbm_lr',
             'delta_auc':float(roc_auc_score(y,predictions[n].pred)-base_auc),
             'ci_95_low':float(low),'ci_95_high':float(high),'bootstrap_repeats':1000})
+    low,high=np.quantile(feature_deltas,[0.025,0.975])
+    intervals.append({'model':'cat_extended','reference':'cat_style',
+        'delta_auc':float(roc_auc_score(y,predictions['cat_extended'].pred)-roc_auc_score(y,predictions['cat_style'].pred)),
+        'ci_95_low':float(low),'ci_95_high':float(high),'bootstrap_repeats':1000})
     (args.out/'paired_bootstrap.json').write_text(json.dumps(intervals,indent=2)+'\n')
     train=pd.read_csv(args.data/'train.csv').set_index('id')
     rows=[]
@@ -69,6 +91,7 @@ def main():
         'cat_pseudo_t0.98':'CatBoost + pseudo-labels (0.98)',
         'cat_pseudo_t0.95':'CatBoost + pseudo-labels (0.95)',
         best['model']+'_lr_3seed':'CatBoost + LR, 3 seeds',
+        'cat_blend_3seed':'CatBoost blend, 3 seeds',
         'reference_lgbm_lr':'Team LightGBM comparator',
     }
     fig,ax=plt.subplots(figsize=(10,5.5),layout='constrained')
